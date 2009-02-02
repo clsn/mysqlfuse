@@ -252,7 +252,12 @@ class MySQLFUSE(Fuse):
             n=self.cursor.execute(query)
             if n<=0:
                 return -fuse.ENOENT
-            st.st_size = int(self.cursor.fetchone()[0])
+            sz=self.cursor.fetchone()[0]
+            if sz is None:
+                sz=0
+            else:
+                sz=int(sz)
+            st.st_size = sz
         return st
 
 
@@ -311,7 +316,7 @@ class MySQLFUSE(Fuse):
             if key in seen:
                 continue
             keys+=key+","
-            values+="NULL,"
+            values+="'',"       # NULL isn't always an option.
         # Chop off the comma
         keys=keys[:-1]
         values=values[:-1]
@@ -363,17 +368,42 @@ class MySQLFUSE(Fuse):
         self.cursor.execute(query)
         x=self.cursor.fetchone()
         self.DBG(str(x))
-        data=x[0]
+        data=str(x[0])
         # doesn't matter if we're on the wrong level of the tree.
         return data[offset:offset+size]
 
 
     @debugfunc
-    def mkdir(self, path, mode, dev):
-        # I think I did all this in mknod.
-        self.mknod(path, mode, dev)
+    def mkdir(self, path, mode):
+        pe=getParts(path)[1:]
+        self.DBG("Still in mkdir; pe="+str(pe))
+        table=pe[0]
+        keys=''
+        seen=[]
+        values=''
+        if self.is_directory(path):
+            elts=pe[1:]
+        else:
+            elts=pe[1:-1]
+        for key in elts:
+            (key, value)=key.split(':',1)
+            value=escape_for_sql(unescape_from_fs(value))
+            seen.append(key)
+            keys+=key+","
+            values+="'%s',"%value
+        # Make sure we have all the required keys.
+        for key in self.keys[table]:
+            if key in seen:
+                continue
+            keys+=key+","
+            values+="NULL,"
+        # Chop off the comma
+        keys=keys[:-1]
+        values=values[:-1]
+        query="REPLACE INTO %s (%s) VALUES (%s)"%(table, keys, values)
+        self.DBG(query)
+        self.cursor.execute(query)
         return 0
-
 
     @debugfunc
     def release(self, path, flags):
@@ -407,8 +437,7 @@ class MySQLFUSE(Fuse):
         if criteria:
             query+="WHERE %s"%criteria
         self.DBG(query)
-        # Not actually gonna do it yet!!
-        # self.cursor.execute(query)
+        self.cursor.execute(query)
         return 0
 
     @debugfunc
