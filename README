@@ -1,0 +1,7 @@
+This is an attempt to use FUSE to provide a view of a MySQL database as a
+filesystem.  See the __doc__ string in the mysqlfuse.py file for an
+explanation.
+
+Currently it MOSTLY works.  But not everything really works quite right.
+This is v.0.00001alpha, mind you.
+
