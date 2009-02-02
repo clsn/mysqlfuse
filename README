@@ -5,3 +5,7 @@ explanation.
 Currently it MOSTLY works.  But not everything really works quite right.
 This is v.0.00001alpha, mind you.
 
+Usage:
+
+mysqlfuse.py -o host=localhost,user=sqluser,passwd=password,db=databasename <mountpoint>
+

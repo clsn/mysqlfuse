@@ -157,12 +157,15 @@ class MySQLFUSE(Fuse):
     @debugfunc
     def __init__(self, *args, **kw):
         Fuse.__init__(self, *args, **kw)
+
+    @debugfunc
+    def fsinit(self):
         # I assume that here I need to log into the db.
-        print str(args)
-        print str(kw)
-        # Gonna have to read this from a config file oslt.
-        self.connection=MySQLdb.Connection(host="XX",user="XX",
-                                           db="XX", passwd="XX")
+        # Declare host/user/passwd/db in the -o options on the cmd line.
+        self.connection=MySQLdb.Connection(host=self.host,
+                                           user=self.user,
+                                           db=self.db, 
+                                           passwd=self.passwd)
         self.cursor=self.connection.cursor()
         self.dcursor=self.connection.cursor(MySQLdb.cursors.DictCursor)
         # Build a data structure encoding things.  The indexes aren't
@@ -216,7 +219,6 @@ class MySQLFUSE(Fuse):
 
     @debugfunc
     def getattr(self, path):
-        self.DBG("inside getattr: %s"%path)
         st = MyStat()
         pe = getParts(path)[1:]
 
@@ -458,8 +460,14 @@ def main():
 
     server = MySQLFUSE(version="%prog " + fuse.__version__,
                        usage=usage, dash_s_do='setsingle')
+    server.parser.add_option(mountopt="host", default="localhost")
+    server.parser.add_option(mountopt="user", default=os.environ['USER'])
+    server.parser.add_option(mountopt="passwd", default=None)
+    server.parser.add_option(mountopt="db", default="test")
 
-    server.parse(errex=1)
+    server.parse(errex=1, values=server)
+    # Parse, *then* initialize.
+    server.fsinit()
     server.main()
 
 if __name__ == '__main__':
