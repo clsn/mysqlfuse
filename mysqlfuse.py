@@ -9,6 +9,7 @@ from subprocess import *
 import os
 import errno
 import MySQLdb
+from copy import copy
 
 import sys
 import pdb
@@ -32,39 +33,43 @@ CREATE TABLE `testtab` (
         PRIMARY KEY (`key1`, `key2`)
 )
 
+This branch of mysqlfuse is going to have the directories alternating
+between keyname and keyvalue.  This should allow browsing by any ordering
+of keys.
+
 (N.B. Handling NULL keys and different types of keys (int, varchar) is
-going to get tricky) The above should lead to this:
+going to get tricky--actually it hasn't.) The above should lead to this:
 
 
-                              testtab
-                             /       \
-                            /         \
-                        key1:foo  ...  key1:bar     (all the extant key1 vals)
-                       /        \      |         \
-                      /          |     |          \
-              key2:baz ... key2:quux   key2:yuzz .. key2:zatz   (all extent key2)
-             /       |      |      |
-            /        |      |      |
-           /         |      |      |
-        data1      data2   data1   data2 ...
+                           testtab
+                          /       \
+                         /         \
+                     key1           key2     (all the key fields)
+               _____/ |  \         / |  \
+              /       |   \       /  |   \
+             foo     ...  bar   baz ...  quux  (all the values for each field)
+              |            |     |         |
+              |            |     |         |
+             key2         key2  key1      key1  (the key fields not above each)
+           /  |  \       / | \ / |  \    / |  \
+          /   |   \     |  | | | |   |  |  |   \
+        baz  ...  quux baz ..  foo..bar foo...  bar  (values for those)
+       /   \
+     data1  data2  ...
+
 
 At the bottom level, the filenames are "data1" and "data2", i.e. all the
 *names* of the non-key fields, and each such file contains the *value* for
-that field in that row (note that each key2:... directory contains a single
-row, assuming the keys have to be unique, i.e. primary).  Higher-level
-entries are all directories, not files, and are named with the field-*name*
-concatenated with a colon and then the *value*, and all extant values are
-represented.
+that field in that row (note that each directory just above the bottom
+level contains a single row, assuming the keys have to be unique,
+i.e. primary).  Higher-level entries are all directories, not files.  They
+alternate between name-of-a-key-field and values-of-a-key-field.  For
+example, /books/book/My_Friend_Flicka/page/71/pagecontents.
 
-The other way might be to do /testtab/key1/foo/key2/baz/data1 (alternate
-key-field names with values in the path), but that seems more complicated.
-Doable once the other way is handled though.
-
-Also, ideally all possible permutations of key-orderings should be
-available, i.e. the top-level dir should have both key1: and key2: keys,
-and /testtab/key1:X/ should have key2:Y entries while /testtab/key2:Y/
-should have key1:X entries, and so on for more types of keys.  The
-alternating path starts to look more tempting with this feature.
+This way, the data can be accessed by any possible permutation of keys,
+since both /books/book/My_Friend_Flicka/page/71/ and also
+/books/page/71/book/My_Friend_Flicka/ are there.  This gets more fun when
+there are more elements in the key.
 
 """
 
@@ -109,16 +114,16 @@ def unescape_from_sql(string):
 
 
 def make_criteria(elts):
+    # Elements are going to be alternating key/value pairs.
     criteria=""
-    for dirname in elts:
-        (key, name)=dirname.split(':',1)
+    for i in range(0,len(elts),2): # Count by twos!
+        (key, name)=elts[i:i+2]
         key=escape_for_sql(unescape_from_fs(key))
         name=escape_for_sql(unescape_from_fs(name))
         criteria+="`%s`='%s' AND "%(key,name)
-    criteria=criteria[:-5]  # Chop off the final AND.
+    if len(criteria)>5:
+        criteria=criteria[:-5]  # Chop off the final AND.
     return criteria
-
-
 
 class MyStat(Stat):
     def __init__(self):
@@ -164,7 +169,7 @@ class MySQLFUSE(Fuse):
         # Declare host/user/passwd/db in the -o options on the cmd line.
         self.connection=MySQLdb.Connection(host=self.host,
                                            user=self.user,
-                                           db=self.db, 
+                                           db=self.db,
                                            passwd=self.passwd)
         self.cursor=self.connection.cursor()
         self.dcursor=self.connection.cursor(MySQLdb.cursors.DictCursor)
@@ -197,9 +202,9 @@ class MySQLFUSE(Fuse):
 
     def is_directory(self, path=None, pathelts=None):
         # Something is a directory iff it isn't deep enough to be a file.
-        # In order to be a file, the depth of the path must equal
-        # 1(for the table) plus the number of keys for that table, plus 1
-        # more to get down to the file level.
+        # In order to be a file, the depth of the path must equal 1(for the
+        # table) plus the number of keys for that table *times two* (key
+        # and value), plus 1 more to get down to the file level.
         if not pathelts:
             pathelts=getParts(path)[1:]
         if self.is_root(pathelts=pathelts):
@@ -212,7 +217,7 @@ class MySQLFUSE(Fuse):
             # We don't have that table!  Fake it.
             self.DBG("Trying to look up keys for non-existent table %s!"%table)
             return False
-        if len(pathelts) < len(keys)+2:
+        if len(pathelts) < 2*len(keys)+2:
             return True
         else:
             return False
@@ -231,22 +236,28 @@ class MySQLFUSE(Fuse):
             return st
         query="SELECT COUNT(*) from `%s` "%table
         if self.is_directory(path):
-            criteria=make_criteria(pe[1:])
+            # Which KIND of directory is it??
+            d=getDepth(path)
+            if d%2==1:
+                # This is a keyvalue dir.
+                criteria=make_criteria(pe[1:])
+            else:
+                criteria=make_criteria(pe[1:-1])
+            if criteria:
+                query+="WHERE %s"%criteria
+            self.DBG(query)
+            self.cursor.execute(query)
+            if self.cursor.fetchone()[0]<1:
+                return -fuse.ENOENT
+            return st
         else:
-            criteria=make_criteria(pe[1:-1])
-        if criteria:
-            query+="WHERE %s"%criteria
-        self.DBG(query)
-        self.cursor.execute(query)
-        if self.cursor.fetchone()[0]<1:
-            return -fuse.ENOENT
-        else:
-            if self.is_directory(path):
-                return st
             # Otherwise, it's a "file", i.e. an actual field.
             st.st_mode = stat.S_IFREG | 0666
             st.st_nlink = 1
+            self.DBG("getattr for a file: %s"%path)
             # Oh what the hell.  Yes, we query EACH TIME.
+            self.DBG("about to make criteria: %s"%str(pe[1:-1]))
+            criteria=make_criteria(pe[1:-1])
             query="SELECT length(`%s`) FROM `%s` WHERE "\
                 "%s"%(escape_for_sql(unescape_from_fs(pe[-1])),
                       table, criteria)
@@ -271,65 +282,70 @@ class MySQLFUSE(Fuse):
             # Populate root dir
             dirents.extend(self.tables)
         else:
-            # find the next key.
+            # OK.  Apart from root (above) we are either at a "keyname"
+            # directory or a "keyvalue" directory.  That is, this dir is
+            # either named "book" or "My Friend Flicka", etc.  I also know
+            # all the keys (if any) specified above this level.  If I am
+            # reading a directory named with a keyname, its contents will
+            # be dirs whose names are values that are available for this
+            # field, searching on whatever is specified between here and
+            # root (really tabledir).  If this directory is named with a
+            # keyvalue, then the contents of this dir will be all the
+            # keynames not already listed on the path from tabledir to
+            # here.
+            #
+            # Unless, of course, we are at a bottom-level directory, in
+            # which case the contents are files named after the non-key
+            # fields in the DB.
             table=escape_for_sql(unescape_from_fs(pe[0]))
             d=getDepth(path)
-            try:
-                nextkey=self.keys[table][d-1]
-            except KeyError:
-                # ?? Not a table?
-                self.DBG("This shouldn't happen.")
-                yield ""
-            except IndexError:
-                # I think this means we're at the "file" level.
-                # Just append the fields.
-                dirents.extend(self.fields[table])
+            # If depth==0, we're at root, we already did that.  If
+            # depth==1, we're at tabledir, reading keynames.  tabledir
+            # counts as a keyvalue dir.  If depth==3, we are at a keyvalue
+            # dir after the first key, and so forth.
+            self.DBG("Depth: %d"%d)
+            if d%2==1:
+                # Odd.  Read keynames.
+                if not self.is_directory(path+"/foo"):
+                    # One level deeper is files!  This is a bottom-level dir.
+                    # This has to be an odd-numbered one, a keyvalued dir.
+                    self.DBG("files now.")
+                    dirents.extend(self.fields[table])
+                else:
+                    all_keys=copy(self.keys[table])
+                    self.DBG("all keynames: %s"%str(all_keys))
+                    for i in range(1,d,2): # Every other dir: the keynames.
+                        self.DBG("Removing %s"%pe[i])
+                        all_keys.remove(pe[i])
+                    # Whatever is left is what goes here.
+                    dirents.extend(all_keys)
             else:
-                criteria=make_criteria(pe[1:])
-                query="SELECT DISTINCT `%s` FROM `%s` "%(nextkey, table)
+                # Even.  Read in keyvalues.  I need to use criteria here.
+                self.DBG("Keyvalues.  pe = %s"%str(pe))
+                self.DBG("About to make criteria from %s"%str(pe[1:-1]))
+                criteria=make_criteria(pe[1:-1])
+                self.DBG("criteria: %s"%criteria)
+                query="SELECT DISTINCT `%s` FROM `%s` "%(pe[-1],table)
                 if criteria:
-                    query+="WHERE %s"%criteria
+                    query+="WHERE "+criteria
                 self.DBG(query)
                 self.cursor.execute(query)
-                dirents.extend([nextkey+':'+str(row[0]) 
-                                for row in self.cursor.fetchall()])
+                l=self.cursor.fetchall()
+                self.DBG("returned: %s"%str(l))
+                # Mustn't forget to convert to string
+                l=map((lambda x:str(x[0])), l) 
+                dirents.extend(l)
         for r in dirents:
             yield fuse.Direntry(r)
 
     @debugfunc
     def mknod(self, path, mode, dev):
-        pe=getParts(path)[1:]
-        table=pe[0]
-        keys=''
-        seen=[]
-        values=''
-        if self.is_directory(path):
-            elts=pe[1:]
-        else:
-            elts=pe[1:-1]
-        for key in elts:
-            (key, value)=key.split(':',1)
-            value=escape_for_sql(unescape_from_fs(value))
-            seen.append(key)
-            keys+="`"+key+"`,"
-            values+="'%s',"%value
-        # Make sure we have all the required keys.
-        for key in self.keys[table]:
-            if key in seen:
-                continue
-            keys+="`"+key+"`,"
-            values+="'',"       # NULL isn't always an option.
-        # Chop off the comma
-        keys=keys[:-1]
-        values=values[:-1]
-        query="REPLACE INTO `%s` (%s) VALUES (%s)"
-        self.DBG(query)
-        self.cursor.execute(query)
+        # I don't know that we need this.
         return 0
 
     @debugfunc
     def unlink(self,path):
-        # You can only remove a "directory" (a bottom-level one).
+        # You can only remove a "directory"
         # So this doesn't really do anything.
         return 0
 
@@ -359,7 +375,6 @@ class MySQLFUSE(Fuse):
             # We shouldn't be here.
             return ""
         table=pe[0]
-        self.DBG("About to make criteria; pe="+str(pe))
         criteria=make_criteria(pe[1:-1])
         field=pe[-1]
         query="SELECT `%s` FROM `%s` "%(field,table)
@@ -377,17 +392,21 @@ class MySQLFUSE(Fuse):
     @debugfunc
     def mkdir(self, path, mode):
         pe=getParts(path)[1:]
-        self.DBG("Still in mkdir; pe="+str(pe))
         table=pe[0]
         keys=''
         seen=[]
         values=''
-        if self.is_directory(path):
-            elts=pe[1:]
-        else:
-            elts=pe[1:-1]
-        for key in elts:
-            (key, value)=key.split(':',1)
+        # We can't make a keyname directory; those are fixed by the DB
+        # structure.  If someone asks, fail.
+        d=getDepth(path)
+        if d==1:
+            # Trying to create a table.  n00b.
+            return -fuse.ENOTDIR
+        if d%2==0:
+            # Trying to create a keyname dir.
+            return -fuse.ENOTDIR
+        for i in range(1,d,2):
+            (key, value)=pe[i:i+2]
             value=escape_for_sql(unescape_from_fs(value))
             seen.append(key)
             keys+="`"+key+"`,"
