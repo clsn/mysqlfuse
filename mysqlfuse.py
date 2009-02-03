@@ -114,7 +114,7 @@ def make_criteria(elts):
         (key, name)=dirname.split(':',1)
         key=escape_for_sql(unescape_from_fs(key))
         name=escape_for_sql(unescape_from_fs(name))
-        criteria+="%s='%s' AND "%(key,name)
+        criteria+="`%s`='%s' AND "%(key,name)
     criteria=criteria[:-5]  # Chop off the final AND.
     return criteria
 
@@ -175,10 +175,10 @@ class MySQLFUSE(Fuse):
         self.keys={}
         self.fields={}
         for table in self.tables:
-            self.cursor.execute("SHOW INDEXES FROM %s WHERE Key_name='PRIMARY'"%table)
+            self.cursor.execute("SHOW INDEXES FROM `%s` WHERE Key_name='PRIMARY'"%table)
             ix=self.cursor.fetchall()
             self.keys[table]=map((lambda x:x[4]), ix)
-            self.cursor.execute("SHOW COLUMNS FROM %s"%table)
+            self.cursor.execute("SHOW COLUMNS FROM `%s`"%table)
             fl=self.cursor.fetchall()
             fl=map((lambda x:x[0]), fl)
             # remove the key fields?
@@ -229,7 +229,7 @@ class MySQLFUSE(Fuse):
             return -fuse.ENOENT
         if len(pe)==1:      # It's a table
             return st
-        query="SELECT COUNT(*) from %s "%table
+        query="SELECT COUNT(*) from `%s` "%table
         if self.is_directory(path):
             criteria=make_criteria(pe[1:])
         else:
@@ -247,7 +247,7 @@ class MySQLFUSE(Fuse):
             st.st_mode = stat.S_IFREG | 0666
             st.st_nlink = 1
             # Oh what the hell.  Yes, we query EACH TIME.
-            query="SELECT length(%s) FROM %s WHERE "\
+            query="SELECT length(`%s`) FROM `%s` WHERE "\
                 "%s"%(escape_for_sql(unescape_from_fs(pe[-1])),
                       table, criteria)
             self.DBG(query)
@@ -286,7 +286,7 @@ class MySQLFUSE(Fuse):
                 dirents.extend(self.fields[table])
             else:
                 criteria=make_criteria(pe[1:])
-                query="SELECT DISTINCT %s FROM %s "%(nextkey, table)
+                query="SELECT DISTINCT `%s` FROM `%s` "%(nextkey, table)
                 if criteria:
                     query+="WHERE %s"%criteria
                 self.DBG(query)
@@ -311,18 +311,18 @@ class MySQLFUSE(Fuse):
             (key, value)=key.split(':',1)
             value=escape_for_sql(unescape_from_fs(value))
             seen.append(key)
-            keys+=key+","
+            keys+="`"+key+"`,"
             values+="'%s',"%value
         # Make sure we have all the required keys.
         for key in self.keys[table]:
             if key in seen:
                 continue
-            keys+=key+","
+            keys+="`"+key+"`,"
             values+="'',"       # NULL isn't always an option.
         # Chop off the comma
         keys=keys[:-1]
         values=values[:-1]
-        query="REPLACE INTO %s (%s) VALUES (%s)"
+        query="REPLACE INTO `%s` (%s) VALUES (%s)"
         self.DBG(query)
         self.cursor.execute(query)
         return 0
@@ -335,7 +335,6 @@ class MySQLFUSE(Fuse):
 
     @debugfunc
     def write(self, path, buf, offset):
-        buf=escape_for_sql(buf)
         pe=getParts(path)[1:]
         # We ought to be at the bottom, at the "file" level.
         if self.is_directory(path):
@@ -346,7 +345,7 @@ class MySQLFUSE(Fuse):
         field=escape_for_sql(unescape_from_fs(pe[-1]))
         data=escape_for_sql(buf)
         # Ignoring offset crap for now.
-        query="UPDATE %s SET %s='%s' "%(table, field, data)
+        query="UPDATE `%s` SET `%s`='%s' "%(table, field, data)
         if criteria:
             query+="WHERE %s"%criteria
         self.DBG(query)
@@ -363,7 +362,7 @@ class MySQLFUSE(Fuse):
         self.DBG("About to make criteria; pe="+str(pe))
         criteria=make_criteria(pe[1:-1])
         field=pe[-1]
-        query="SELECT %s FROM %s "%(field,table)
+        query="SELECT `%s` FROM `%s` "%(field,table)
         if criteria:
             query +="WHERE %s"%criteria
         self.DBG(query)
@@ -391,18 +390,18 @@ class MySQLFUSE(Fuse):
             (key, value)=key.split(':',1)
             value=escape_for_sql(unescape_from_fs(value))
             seen.append(key)
-            keys+=key+","
+            keys+="`"+key+"`,"
             values+="'%s',"%value
         # Make sure we have all the required keys.
         for key in self.keys[table]:
             if key in seen:
                 continue
-            keys+=key+","
-            values+="NULL,"
+            keys+="`"+key+"`,"
+            values+="'',"
         # Chop off the comma
         keys=keys[:-1]
         values=values[:-1]
-        query="REPLACE INTO %s (%s) VALUES (%s)"%(table, keys, values)
+        query="REPLACE INTO `%s` (%s) VALUES (%s)"%(table, keys, values)
         self.DBG(query)
         self.cursor.execute(query)
         return 0
@@ -435,7 +434,7 @@ class MySQLFUSE(Fuse):
         # I think trying to delete a table will only delete its contents,
         # not the actual table.
         # That violates Least Astonishment; may have to change that.
-        query="DELETE FROM %s "%table
+        query="DELETE FROM `%s` "%table
         if criteria:
             query+="WHERE %s"%criteria
         self.DBG(query)
